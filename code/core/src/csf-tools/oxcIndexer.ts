@@ -606,6 +606,28 @@ export function indexCsfWithOxc(
     }
   }
 
+  let factoryMetaName: string | undefined;
+
+  if (!metaNode) {
+    for (const [name, rawInit] of rawBindings) {
+      const call = memberCall(rawInit);
+      if (!call || call.method !== 'meta' || !previewImports.has(call.object)) {
+        continue;
+      }
+
+      const argument = Array.isArray(call.node.arguments)
+        ? unwrapExpression(call.node.arguments[0])
+        : undefined;
+      if (!argument || argument.type !== 'ObjectExpression') {
+        return fallback('meta-unsupported');
+      }
+
+      metaNode = argument;
+      factoryMetaName = name;
+      break;
+    }
+  }
+
   if (!metaNode) {
     return fallback('missing-meta');
   }
