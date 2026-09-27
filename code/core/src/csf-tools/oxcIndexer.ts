@@ -334,8 +334,12 @@ const parseStory = (
     return story;
   }
 
-  // Babel's CSF2 bind detection only recognizes a direct bind call. A TypeScript wrapper such as
-  // `Template.bind({}) as Story` is not treated as a bind story, so preserve that behavior.
+  // Babel only recognizes a direct bind call as canonical CSF2. A TS-wrapped bind remains a
+  // registered story, but its storyFn stat is false.
+  if (rawNode !== node && isCanonicalCsf2BindCall(node)) {
+    return story;
+  }
+
   if (rawNode === node && isCanonicalCsf2BindCall(node)) {
     const templateName = identifierName(node.callee.object);
     const template = templateName ? bindings.get(templateName) : undefined;
