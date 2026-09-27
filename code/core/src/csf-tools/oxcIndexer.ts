@@ -7,10 +7,26 @@ import { Tag } from '../shared/constants/tags.ts';
 
 const MODULE_MOCK_REGEX = /^[.\/#].*\.mock($|\.[^.]*$)/i;
 
+const WRAPPER_TYPES = new Set([
+  'TSAsExpression',
+  'TSSatisfiesExpression',
+  'TSNonNullExpression',
+  'ParenthesizedExpression',
+  'ChainExpression',
+]);
+
+const FUNCTION_TYPES = new Set([
+  'ArrowFunctionExpression',
+  'FunctionExpression',
+  'FunctionDeclaration',
+]);
+
 type AstNode = {
   type: string;
   [key: string]: any;
 };
+
+type Bindings = Map<string, AstNode>;
 
 export type OxcCsfFallbackReason =
   | 'parse-error'
@@ -30,484 +46,402 @@ export type OxcCsfIndexerDiagnostics = {
   fallbackReason?: OxcCsfFallbackReason;
 };
 
-type StoryDescriptor = string[] | RegExp;
+type Annotated = {
+  tags: string[];
+  annotations: Set<string>;
+  play?: AstNode;
+};
 
-type StaticMeta = {
+type StaticMeta = Annotated & {
   id?: string;
   title?: string;
-  tags: string[];
   rawComponentPath?: string;
-  includeStories?: StoryDescriptor;
-  excludeStories?: StoryDescriptor;
-  annotations: Set<string>;
-  play?: AstNode;
+  includeStories?: string[] | RegExp;
+  excludeStories?: string[] | RegExp;
 };
 
-type StaticStory = {
+type StaticStory = Annotated & {
   exportName: string;
   name: string;
-  tags: string[];
   customId?: string;
-  annotations: Set<string>;
   storyFn: boolean;
   factory: boolean;
-  play?: AstNode;
-  playTagInjected: boolean;
 };
+
+class OxcFallback extends Error {
+  constructor(readonly reason: OxcCsfFallbackReason) {
+    super(reason);
+  }
+}
+
+function fallback(reason: OxcCsfFallbackReason): never {
+  throw new OxcFallback(reason);
+}
 
 const isNode = (value: unknown): value is AstNode =>
   !!value && typeof value === 'object' && typeof (value as AstNode).type === 'string';
 
 const unwrapExpression = (input: unknown): AstNode | undefined => {
-  if (!isNode(input)) {
-    return undefined;
-  }
-
-  let node = input;
-  while (
-    [
-      'TSAsExpression',
-      'TSSatisfiesExpression',
-      'TSNonNullExpression',
-      'ParenthesizedExpression',
-      'ChainExpression',
-    ].includes(node.type)
-  ) {
-    if (!isNode(node.expression)) {
-      return undefined;
-    }
+  let node = isNode(input) ? input : undefined;
+  while (node && WRAPPER_TYPES.has(node.type)) {
     node = node.expression;
   }
-
   return node;
 };
 
-const identifierName = (node: unknown) =>
-  isNode(node) && node.type === 'Identifier' && typeof node.name === 'string'
-    ? node.name
-    : undefined;
+const isStoryFn = (node: AstNode) =>
+  node.type === 'ArrowFunctionExpression' || node.type === 'FunctionDeclaration';
 
-const stringValue = (input: unknown) => {
+const identifierName = (node: AstNode | undefined): string | undefined =>
+  node?.type === 'Identifier' ? node.name : undefined;
+
+const stringValue = (input: unknown): string | undefined => {
   const node = unwrapExpression(input);
-  if (!node) {
-    return undefined;
-  }
-
-  if (
-    (node.type === 'Literal' || node.type === 'StringLiteral') &&
-    typeof node.value === 'string'
-  ) {
-    return node.value;
-  }
-
-  return undefined;
+  return node?.type === 'Literal' && typeof node.value === 'string' ? node.value : undefined;
 };
 
-const propertyName = (property: AstNode) => {
-  if (!['Property', 'ObjectProperty'].includes(property.type) || property.computed) {
-    return undefined;
-  }
-
-  return identifierName(property.key) ?? stringValue(property.key);
-};
+const propertyName = (property: AstNode) =>
+  property.type === 'Property' && !property.computed
+    ? (identifierName(property.key) ?? stringValue(property.key))
+    : undefined;
 
 const objectProperties = (input: unknown): AstNode[] | undefined => {
   const node = unwrapExpression(input);
-  if (!node || node.type !== 'ObjectExpression' || !Array.isArray(node.properties)) {
+  return node?.type === 'ObjectExpression'
+    ? node.properties.filter((property: AstNode) => property.type === 'Property')
+    : undefined;
+};
+
+const resolveBinding = (input: unknown, bindings: Bindings) => {
+  const node = unwrapExpression(input);
+  const name = identifierName(node);
+  return name ? unwrapExpression(bindings.get(name)) : node;
+};
+
+const boundString = (input: unknown, bindings: Bindings) =>
+  stringValue(resolveBinding(input, bindings));
+
+const stringArray = (input: unknown, bindings: Bindings): string[] | undefined => {
+  const array = resolveBinding(input, bindings);
+  if (array?.type !== 'ArrayExpression') {
     return undefined;
   }
-
-  return node.properties.filter(
-    (property: unknown): property is AstNode =>
-      isNode(property) && ['Property', 'ObjectProperty'].includes(property.type)
-  );
+  const values: (string | undefined)[] = array.elements.map(stringValue);
+  return values.every((value): value is string => value !== undefined) ? values : undefined;
 };
 
-const resolveBinding = (node: unknown, bindings: Map<string, AstNode>) => {
-  const unwrapped = unwrapExpression(node);
-  const name = identifierName(unwrapped);
-  return name ? unwrapExpression(bindings.get(name)) : unwrapped;
+const regexValue = (input: unknown, bindings: Bindings) => {
+  const regex = resolveBinding(input, bindings)?.regex;
+  return regex ? new RegExp(regex.pattern, regex.flags) : undefined;
 };
 
-const stringArray = (node: unknown, bindings: Map<string, AstNode>): string[] | undefined => {
-  const resolved = resolveBinding(node, bindings);
-  if (!resolved || resolved.type !== 'ArrayExpression' || !Array.isArray(resolved.elements)) {
+const memberNames = (input: unknown) => {
+  const node = unwrapExpression(input);
+  if (node?.type !== 'MemberExpression' || node.computed) {
     return undefined;
   }
-
-  const values: string[] = [];
-  for (const element of resolved.elements) {
-    const value = stringValue(element);
-    if (value === undefined) {
-      return undefined;
-    }
-    values.push(value);
-  }
-
-  return values;
+  const object = identifierName(node.object);
+  const property = identifierName(node.property);
+  return object && property ? { object, property } : undefined;
 };
-
-const regexValue = (node: unknown, bindings: Map<string, AstNode>): RegExp | undefined => {
-  const resolved = resolveBinding(node, bindings);
-  if (!resolved) {
-    return undefined;
-  }
-
-  if (
-    resolved.type === 'RegExpLiteral' &&
-    typeof resolved.pattern === 'string'
-  ) {
-    return new RegExp(resolved.pattern, resolved.flags ?? '');
-  }
-
-  if (
-    resolved.type === 'Literal' &&
-    resolved.regex &&
-    typeof resolved.regex.pattern === 'string'
-  ) {
-    return new RegExp(resolved.regex.pattern, resolved.regex.flags ?? '');
-  }
-
-  return undefined;
-};
-
-const storyDescriptor = (
-  node: unknown,
-  bindings: Map<string, AstNode>
-): StoryDescriptor | undefined => stringArray(node, bindings) ?? regexValue(node, bindings);
-
-const isCanonicalCsf2BindCall = (node: AstNode) => {
-  if (node.type !== 'CallExpression' || !isNode(node.callee)) {
-    return false;
-  }
-
-  const callee = node.callee;
-  if (
-    callee.type !== 'MemberExpression' ||
-    callee.computed ||
-    identifierName(callee.property) !== 'bind' ||
-    !identifierName(callee.object)
-  ) {
-    return false;
-  }
-
-  const args = Array.isArray(node.arguments) ? node.arguments : [];
-  if (args.length === 0) {
-    return true;
-  }
-
-  return args.length === 1 && objectProperties(args[0])?.length === 0;
-};
-
-const findProperty = (node: unknown, name: string) =>
-  objectProperties(node)?.find((property) => propertyName(property) === name);
-
-const propertyValue = (property: AstNode | undefined) => property?.value;
 
 const memberCall = (input: unknown) => {
   const node = unwrapExpression(input);
-  if (!node || node.type !== 'CallExpression' || !isNode(node.callee)) {
+  if (node?.type !== 'CallExpression') {
     return undefined;
   }
-
-  const callee = node.callee;
-  if (
-    callee.type !== 'MemberExpression' ||
-    callee.computed ||
-    !isNode(callee.object) ||
-    !isNode(callee.property)
-  ) {
-    return undefined;
-  }
-
-  const object = identifierName(callee.object);
-  const method = identifierName(callee.property);
-  return object && method ? { node, object, method } : undefined;
+  const callee = memberNames(node.callee);
+  return callee && { object: callee.object, method: callee.property, args: node.arguments };
 };
+
+const isEmptyBindArgs = (args: unknown[]) =>
+  args.length === 0 || (args.length === 1 && objectProperties(args[0])?.length === 0);
 
 const hasMount = (input: unknown) => {
   const node = unwrapExpression(input);
-  if (
-    !node ||
-    !['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration'].includes(node.type) ||
-    !Array.isArray(node.params) ||
-    node.params.length === 0
-  ) {
-    return false;
-  }
-
-  const [first] = node.params;
-  if (!isNode(first) || first.type !== 'ObjectPattern' || !Array.isArray(first.properties)) {
-    return false;
-  }
-
-  return first.properties.some(
-    (property: unknown) =>
-      isNode(property) &&
-      ['Property', 'ObjectProperty'].includes(property.type) &&
-      propertyName(property) === 'mount'
+  const [first] = node && FUNCTION_TYPES.has(node.type) ? node.params : [];
+  return (
+    first?.type === 'ObjectPattern' &&
+    first.properties.some((property: AstNode) => propertyName(property) === 'mount')
   );
 };
 
-const annotationStats = (
-  story: StaticStory,
-  meta: StaticMeta,
-  moduleMock: boolean
-): IndexInputStats => ({
-  factory: story.factory,
-  play: story.annotations.has('play') || meta.annotations.has('play'),
-  render: story.annotations.has('render') || meta.annotations.has('render'),
-  loaders: story.annotations.has('loaders') || meta.annotations.has('loaders'),
-  beforeEach: story.annotations.has('beforeEach') || meta.annotations.has('beforeEach'),
-  globals: story.annotations.has('globals') || meta.annotations.has('globals'),
-  tags: story.annotations.has('tags') || meta.annotations.has('tags'),
-  storyFn: story.storyFn,
-  mount: hasMount(story.play ?? meta.play),
-  moduleMock,
-});
+const withPlayTag = ({ tags, annotations }: Annotated) =>
+  annotations.has('play') ? [...tags, Tag.PLAY_FN] : tags;
 
-const parseMeta = (
-  node: AstNode,
-  bindings: Map<string, AstNode>,
-  importsByLocalName: Map<string, string>
-): StaticMeta | null => {
-  const properties = objectProperties(node);
-  if (!properties) {
-    return null;
-  }
-
-  const meta: StaticMeta = {
-    tags: [],
-    annotations: new Set(),
+const indexStats = (story: StaticStory, meta: StaticMeta, moduleMock: boolean): IndexInputStats => {
+  const has = (key: string) => story.annotations.has(key) || meta.annotations.has(key);
+  return {
+    factory: story.factory,
+    play: has('play'),
+    render: has('render'),
+    loaders: has('loaders'),
+    beforeEach: has('beforeEach'),
+    globals: has('globals'),
+    tags: has('tags'),
+    storyFn: story.storyFn,
+    mount: hasMount(story.play ?? meta.play),
+    moduleMock,
   };
+};
 
-  for (const property of properties) {
+const parseMeta = (node: AstNode, bindings: Bindings, imports: Map<string, string>) => {
+  const meta: StaticMeta = { tags: [], annotations: new Set() };
+
+  for (const property of objectProperties(node) ?? []) {
     const key = propertyName(property);
     if (!key) {
       continue;
     }
-
     meta.annotations.add(key);
 
-    if (key === 'title') {
-      const value = stringValue(resolveBinding(propertyValue(property), bindings));
-      if (value === undefined) {
-        return null;
-      }
-      meta.title = value;
-    } else if (key === 'id') {
-      const value = stringValue(resolveBinding(propertyValue(property), bindings));
-      if (value === undefined) {
-        return null;
-      }
-      meta.id = value;
+    if (key === 'title' || key === 'id') {
+      meta[key] = boundString(property.value, bindings) ?? fallback('meta-unsupported');
     } else if (key === 'tags') {
-      const value = stringArray(propertyValue(property), bindings);
-      if (!value) {
-        return null;
-      }
-      meta.tags = value;
+      meta.tags = stringArray(property.value, bindings) ?? fallback('meta-unsupported');
     } else if (key === 'component') {
-      const componentName = identifierName(propertyValue(property));
-      if (componentName) {
-        meta.rawComponentPath = importsByLocalName.get(componentName);
-      }
+      const componentName = identifierName(property.value);
+      meta.rawComponentPath = componentName && imports.get(componentName);
     } else if (key === 'includeStories' || key === 'excludeStories') {
-      const value = storyDescriptor(propertyValue(property), bindings);
-      if (!value) {
-        return null;
-      }
-      meta[key] = value;
+      meta[key] =
+        stringArray(property.value, bindings) ??
+        regexValue(property.value, bindings) ??
+        fallback('meta-unsupported');
     } else if (key === 'play') {
-      meta.play = unwrapExpression(propertyValue(property));
+      meta.play = unwrapExpression(property.value);
     }
-  }
-
-  if (meta.annotations.has('play')) {
-    meta.tags = [...meta.tags, Tag.PLAY_FN];
   }
 
   return meta;
 };
 
-const parseStory = (
-  exportName: string,
-  input: unknown,
-  bindings: Map<string, AstNode>
-): StaticStory | null => {
-  const rawNode = isNode(input) ? input : undefined;
-  const node = unwrapExpression(input);
-  if (!node) {
-    return null;
-  }
-
+const parseStory = (exportName: string, input: unknown, bindings: Bindings) => {
+  const node = unwrapExpression(input) ?? fallback('story-unsupported');
   const story: StaticStory = {
     exportName,
     name: storyNameFromExport(exportName),
     tags: [],
     annotations: new Set(),
-    storyFn: ['ArrowFunctionExpression', 'FunctionDeclaration'].includes(node.type),
+    storyFn: isStoryFn(node),
     factory: false,
-    playTagInjected: false,
   };
 
-  if (
-    ['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration'].includes(node.type)
-  ) {
+  if (FUNCTION_TYPES.has(node.type)) {
     return story;
   }
 
-  // Babel only recognizes a direct bind call as canonical CSF2. A TS-wrapped bind remains a
-  // registered story, but its storyFn stat is false.
-  if (rawNode !== node && isCanonicalCsf2BindCall(node)) {
-    return story;
-  }
-
-  if (rawNode === node && isCanonicalCsf2BindCall(node)) {
-    const templateName = identifierName(node.callee.object);
-    const template = templateName ? bindings.get(templateName) : undefined;
-    const resolvedTemplate = template && unwrapExpression(template);
-    if (
-      !resolvedTemplate ||
-      !['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration'].includes(
-        resolvedTemplate.type
-      )
-    ) {
-      return null;
+  const call = memberCall(node);
+  if (call?.method === 'bind' && isEmptyBindArgs(call.args)) {
+    // Babel only treats an unwrapped `Template.bind({})` as CSF2, so a cast bind keeps storyFn false.
+    if (node === input) {
+      const template = unwrapExpression(bindings.get(call.object));
+      if (!template || !FUNCTION_TYPES.has(template.type)) {
+        fallback('story-unsupported');
+      }
+      story.storyFn = isStoryFn(template);
     }
-    story.storyFn = ['ArrowFunctionExpression', 'FunctionDeclaration'].includes(
-      resolvedTemplate.type
-    );
     return story;
   }
 
-  const properties = objectProperties(node);
-  if (!properties) {
-    return null;
-  }
-
-  for (const property of properties) {
+  for (const property of objectProperties(node) ?? fallback('story-unsupported')) {
     const key = propertyName(property);
     if (!key) {
       continue;
     }
-
     story.annotations.add(key);
 
     if (key === 'name') {
-      const value = stringValue(resolveBinding(propertyValue(property), bindings));
-      if (value === undefined) {
-        return null;
-      }
-      story.name = value;
+      story.name = boundString(property.value, bindings) ?? fallback('story-unsupported');
     } else if (key === 'tags') {
-      const value = stringArray(propertyValue(property), bindings);
-      if (!value) {
-        return null;
-      }
-      story.tags = value;
+      story.tags = stringArray(property.value, bindings) ?? fallback('story-unsupported');
     } else if (key === 'parameters') {
-      const parameters = resolveBinding(propertyValue(property), bindings);
-      const idProperty = findProperty(parameters, '__id');
+      const idProperty = objectProperties(resolveBinding(property.value, bindings))?.find(
+        (parameter) => propertyName(parameter) === '__id'
+      );
       if (idProperty) {
-        const value = stringValue(resolveBinding(propertyValue(idProperty), bindings));
-        if (value === undefined) {
-          return null;
-        }
-        story.customId = value;
+        story.customId = boundString(idProperty.value, bindings) ?? fallback('story-unsupported');
       }
     } else if (key === 'play') {
-      story.play = unwrapExpression(propertyValue(property));
+      story.play = unwrapExpression(property.value);
     }
   }
 
-  if (story.annotations.has('play')) {
-    story.tags = [...story.tags, Tag.PLAY_FN];
-    story.playTagInjected = true;
-  }
-
   return story;
-};
-
-const memberNames = (node: unknown) => {
-  const resolved = unwrapExpression(node);
-  if (
-    !resolved ||
-    resolved.type !== 'MemberExpression' ||
-    resolved.computed ||
-    !isNode(resolved.object) ||
-    !isNode(resolved.property)
-  ) {
-    return undefined;
-  }
-
-  const object = identifierName(resolved.object);
-  const property = identifierName(resolved.property);
-  return object && property ? { object, property } : undefined;
 };
 
 const applyLegacyAnnotation = (
   story: StaticStory,
   key: string,
   value: unknown,
-  bindings: Map<string, AstNode>
-) => {
-  if (key === 'story') {
-    const properties = objectProperties(value);
-    if (!properties) {
-      story.annotations.add(key);
-      return true;
-    }
-
-    for (const property of properties) {
+  bindings: Bindings
+): void => {
+  const nested = key === 'story' ? objectProperties(value) : undefined;
+  if (nested) {
+    for (const property of nested) {
       const nestedKey = propertyName(property);
-      if (
-        nestedKey &&
-        !applyLegacyAnnotation(story, nestedKey, propertyValue(property), bindings)
-      ) {
-        return false;
+      if (nestedKey) {
+        applyLegacyAnnotation(story, nestedKey, property.value, bindings);
       }
     }
-    return true;
+    return;
   }
 
   story.annotations.add(key);
 
   if (key === 'storyName') {
-    const name = stringValue(resolveBinding(value, bindings));
-    if (name !== undefined) {
-      story.name = name;
-    }
-    return true;
-  }
-
-  if (key === 'tags') {
-    const tags = stringArray(value, bindings);
-    if (!tags) {
-      return false;
-    }
-    story.tags = story.annotations.has('play') ? [...tags, Tag.PLAY_FN] : tags;
-    story.playTagInjected = story.annotations.has('play');
-    return true;
-  }
-
-  if (key === 'play') {
+    story.name = boundString(value, bindings) ?? story.name;
+  } else if (key === 'tags') {
+    story.tags = stringArray(value, bindings) ?? fallback('expression-statement');
+  } else if (key === 'play') {
     story.play = unwrapExpression(value);
-    if (!story.playTagInjected) {
-      story.tags = [...story.tags, Tag.PLAY_FN];
-      story.playTagInjected = true;
+  }
+};
+
+const indexStaticCsf = (code: string, fileName: string, options: IndexerOptions) => {
+  let result: ReturnType<typeof parseSync>;
+  try {
+    result = parseSync(fileName, code);
+  } catch {
+    return fallback('parse-error');
+  }
+  if (result.errors.length > 0) {
+    fallback('program-error');
+  }
+
+  const body = result.program.body as AstNode[];
+  const bindings: Bindings = new Map();
+  const imports = new Map<string, string>();
+  let moduleMock = false;
+  let defaultExport: AstNode | undefined;
+
+  for (const statement of body) {
+    if (statement.type === 'ImportDeclaration') {
+      const source = stringValue(statement.source) || fallback('import-source');
+      moduleMock ||= MODULE_MOCK_REGEX.test(source);
+      for (const specifier of statement.specifiers) {
+        imports.set(specifier.local.name, source);
+      }
+      continue;
+    }
+    if (statement.type === 'ExportAllDeclaration') {
+      fallback('export-all');
+    }
+    if (statement.type === 'ExportDefaultDeclaration') {
+      defaultExport = statement.declaration;
+      continue;
+    }
+    if (statement.type === 'ExportNamedDeclaration' && statement.specifiers.length > 0) {
+      fallback('named-export-specifier');
+    }
+
+    const declaration: AstNode | null =
+      statement.type === 'ExportNamedDeclaration' ? statement.declaration : statement;
+    if (declaration?.type === 'VariableDeclaration') {
+      for (const { id, init } of declaration.declarations) {
+        const name = identifierName(id);
+        if (name && isNode(init)) {
+          bindings.set(name, init);
+        }
+      }
+    } else if (declaration?.type === 'FunctionDeclaration' && declaration.id) {
+      bindings.set(declaration.id.name, declaration);
     }
   }
 
-  return true;
+  let metaNode: AstNode | undefined;
+  let factoryMetaName: string | undefined;
+
+  if (defaultExport) {
+    metaNode = resolveBinding(defaultExport, bindings);
+    if (metaNode?.type !== 'ObjectExpression') {
+      fallback('default-export');
+    }
+  } else {
+    for (const [name, init] of bindings) {
+      const call = memberCall(init);
+      if (call?.method !== 'meta' || !imports.get(call.object)?.includes('.storybook/preview')) {
+        continue;
+      }
+      metaNode = unwrapExpression(call.args[0]);
+      if (metaNode?.type !== 'ObjectExpression') {
+        fallback('meta-unsupported');
+      }
+      factoryMetaName = name;
+      break;
+    }
+  }
+
+  const meta = parseMeta(metaNode ?? fallback('missing-meta'), bindings, imports);
+  const title = options.makeTitle(meta.title);
+  const stories = new Map<string, StaticStory>();
+
+  for (const statement of body) {
+    const declaration: AstNode | null | undefined =
+      statement.type === 'ExportNamedDeclaration' ? statement.declaration : undefined;
+
+    if (declaration?.type === 'FunctionDeclaration') {
+      const exportName = identifierName(declaration.id) ?? fallback('story-export');
+      stories.set(exportName, parseStory(exportName, declaration, bindings));
+    } else if (declaration?.type === 'VariableDeclaration') {
+      for (const { id, init } of declaration.declarations) {
+        const exportName = identifierName(id) ?? fallback('story-export');
+        if (exportName === '__namedExportsOrder') {
+          fallback('named-exports-order');
+        }
+        if (!factoryMetaName) {
+          stories.set(exportName, parseStory(exportName, init, bindings));
+          continue;
+        }
+
+        const call = memberCall(init);
+        if (call?.object !== factoryMetaName || !['story', 'extend'].includes(call.method)) {
+          continue;
+        }
+        const story = parseStory(exportName, call.args[0], bindings);
+        story.factory = true;
+        story.storyFn = false;
+        stories.set(exportName, story);
+      }
+    } else if (statement.type === 'ExpressionStatement') {
+      const expression = unwrapExpression(statement.expression);
+      if (expression?.type === 'CallExpression') {
+        const callee = memberNames(expression.callee);
+        if (callee?.property === 'test' && stories.has(callee.object)) {
+          fallback('expression-statement');
+        }
+      } else if (expression?.type === 'AssignmentExpression') {
+        const target = memberNames(expression.left);
+        const story = target && stories.get(target.object);
+        if (story) {
+          applyLegacyAnnotation(story, target.property, expression.right, bindings);
+        }
+      }
+    }
+  }
+
+  return [...stories.values()]
+    .filter((story) => isExportStory(story.exportName, meta))
+    .map(
+      (story) =>
+        ({
+          rawComponentPath: meta.rawComponentPath,
+          exportName: story.exportName,
+          title,
+          metaId: meta.id,
+          tags: [...withPlayTag(meta), ...withPlayTag(story)],
+          __id: story.customId ?? toId(meta.id || title, storyNameFromExport(story.exportName)),
+          __stats: indexStats(story, meta, moduleMock),
+          type: 'story',
+          subtype: 'story',
+          name: story.name,
+        }) satisfies IndexInput
+    );
 };
 
 /**
- * Read-only CSF indexer fast path backed by OXC.
+ * Index statically analyzable CSF with OXC.
  *
- * This intentionally supports only statically analyzable CSF 1-3 shapes. Returning null means
- * "unsupported by the fast path" and lets the caller fall back to the existing Babel/CsfFile
- * implementation, which remains the compatibility oracle.
+ * Returns null for shapes the fast path does not support, so callers can fall back to `loadCsf`.
  */
 export function indexCsfWithOxc(
   code: string,
@@ -515,254 +449,15 @@ export function indexCsfWithOxc(
   options: IndexerOptions,
   diagnostics?: OxcCsfIndexerDiagnostics
 ): IndexInput[] | null {
-  const fallback = (reason: OxcCsfFallbackReason) => {
+  try {
+    return indexStaticCsf(code, fileName, options);
+  } catch (error) {
+    if (!(error instanceof OxcFallback)) {
+      throw error;
+    }
     if (diagnostics) {
-      diagnostics.fallbackReason = reason;
+      diagnostics.fallbackReason = error.reason;
     }
     return null;
-  };
-  let result: ReturnType<typeof parseSync>;
-  try {
-    result = parseSync(fileName, code);
-  } catch {
-    return fallback('parse-error');
   }
-
-  if (result.errors.length > 0 || !result.program || !Array.isArray(result.program.body)) {
-    return fallback('program-error');
-  }
-
-  const body = result.program.body as AstNode[];
-  const bindings = new Map<string, AstNode>();
-  const rawBindings = new Map<string, AstNode>();
-  const previewImports = new Set<string>();
-  const importsByLocalName = new Map<string, string>();
-  const importSources: string[] = [];
-
-  for (const statement of body) {
-    if (statement.type === 'ImportDeclaration') {
-      const source = stringValue(statement.source);
-      if (!source) {
-        return fallback('import-source');
-      }
-      importSources.push(source);
-      for (const specifier of statement.specifiers ?? []) {
-        const localName = identifierName(specifier.local);
-        if (localName) {
-          importsByLocalName.set(localName, source);
-          if (source.includes('.storybook/preview')) {
-            previewImports.add(localName);
-          }
-        }
-      }
-      continue;
-    }
-
-    const declaration =
-      statement.type === 'ExportNamedDeclaration' && isNode(statement.declaration)
-        ? statement.declaration
-        : statement;
-
-    if (declaration.type === 'VariableDeclaration') {
-      for (const declarator of declaration.declarations ?? []) {
-        const name = identifierName(declarator.id);
-        const rawInit = isNode(declarator.init) ? declarator.init : undefined;
-        const init = unwrapExpression(declarator.init);
-        if (name && rawInit) {
-          rawBindings.set(name, rawInit);
-        }
-        if (name && init) {
-          bindings.set(name, init);
-        }
-      }
-    } else if (declaration.type === 'FunctionDeclaration') {
-      const name = identifierName(declaration.id);
-      if (name) {
-        bindings.set(name, declaration);
-      }
-    }
-  }
-
-  let metaNode: AstNode | undefined;
-  for (const statement of body) {
-    if (statement.type === 'ExportAllDeclaration') {
-      return fallback('export-all');
-    }
-
-    if (statement.type === 'ExportDefaultDeclaration') {
-      const declaration = resolveBinding(statement.declaration, bindings);
-      if (!declaration || declaration.type !== 'ObjectExpression') {
-        return fallback('default-export');
-      }
-      metaNode = declaration;
-    }
-
-    if (
-      statement.type === 'ExportNamedDeclaration' &&
-      Array.isArray(statement.specifiers) &&
-      statement.specifiers.length > 0
-    ) {
-      return fallback('named-export-specifier');
-    }
-  }
-
-  let factoryMetaName: string | undefined;
-
-  if (!metaNode) {
-    for (const [name, rawInit] of rawBindings) {
-      const call = memberCall(rawInit);
-      if (!call || call.method !== 'meta' || !previewImports.has(call.object)) {
-        continue;
-      }
-
-      const argument = Array.isArray(call.node.arguments)
-        ? unwrapExpression(call.node.arguments[0])
-        : undefined;
-      if (!argument || argument.type !== 'ObjectExpression') {
-        return fallback('meta-unsupported');
-      }
-
-      metaNode = argument;
-      factoryMetaName = name;
-      break;
-    }
-  }
-
-  if (!metaNode) {
-    return fallback('missing-meta');
-  }
-
-  const meta = parseMeta(metaNode, bindings, importsByLocalName);
-  if (!meta) {
-    return fallback('meta-unsupported');
-  }
-
-  meta.title = options.makeTitle(meta.title);
-  const moduleMock = importSources.some((source) => MODULE_MOCK_REGEX.test(source));
-
-  const stories: StaticStory[] = [];
-  const storyByExportName = new Map<string, StaticStory>();
-
-  for (const statement of body) {
-    if (statement.type === 'ExportNamedDeclaration' && isNode(statement.declaration)) {
-      const declaration = statement.declaration;
-
-      if (declaration.type === 'VariableDeclaration') {
-        for (const declarator of declaration.declarations ?? []) {
-          const exportName = identifierName(declarator.id);
-          if (!exportName) {
-            return fallback('story-export');
-          }
-          if (exportName === '__namedExportsOrder') {
-            return fallback('named-exports-order');
-          }
-
-          let storyInput = declarator.init;
-          let factory = false;
-
-          if (factoryMetaName) {
-            const call = memberCall(declarator.init);
-            if (
-              !call ||
-              call.object !== factoryMetaName ||
-              !['story', 'extend'].includes(call.method)
-            ) {
-              continue;
-            }
-
-            factory = true;
-            storyInput = Array.isArray(call.node.arguments) ? call.node.arguments[0] : undefined;
-          }
-
-          const story = parseStory(exportName, storyInput, bindings);
-          if (!story) {
-            return fallback('story-unsupported');
-          }
-          story.factory = factory;
-          if (factory) {
-            story.storyFn = false;
-          }
-
-          stories.push(story);
-          storyByExportName.set(exportName, story);
-        }
-      } else if (declaration.type === 'FunctionDeclaration') {
-        const exportName = identifierName(declaration.id);
-        if (!exportName) {
-          return fallback('story-export');
-        }
-
-        const story = parseStory(exportName, declaration, bindings);
-        if (!story) {
-          return fallback('story-unsupported');
-        }
-
-        stories.push(story);
-        storyByExportName.set(exportName, story);
-      }
-
-      continue;
-    }
-
-    if (statement.type !== 'ExpressionStatement') {
-      continue;
-    }
-
-    const expression = unwrapExpression(statement.expression);
-    if (!expression) {
-      continue;
-    }
-
-    if (expression.type === 'CallExpression') {
-      const callee = memberNames(expression.callee);
-      if (callee?.property === 'test' && storyByExportName.has(callee.object)) {
-        return fallback('expression-statement');
-      }
-      continue;
-    }
-
-    if (expression.type !== 'AssignmentExpression') {
-      continue;
-    }
-
-    const target = memberNames(expression.left);
-    if (!target) {
-      continue;
-    }
-
-    const story = storyByExportName.get(target.object);
-    if (!story) {
-      continue;
-    }
-
-    if (!applyLegacyAnnotation(story, target.property, expression.right, bindings)) {
-      return fallback('expression-statement');
-    }
-  }
-
-  const metaForFilter = {
-    includeStories: meta.includeStories,
-    excludeStories: meta.excludeStories,
-  };
-
-  return stories
-    .filter((story) => isExportStory(story.exportName, metaForFilter))
-    .map((story) => {
-      const id =
-        story.customId ??
-        toId((meta.id || meta.title) as string, storyNameFromExport(story.exportName));
-
-      return {
-        rawComponentPath: meta.rawComponentPath,
-        exportName: story.exportName,
-        title: meta.title,
-        metaId: meta.id,
-        tags: [...meta.tags, ...story.tags],
-        __id: id,
-        __stats: annotationStats(story, meta, moduleMock),
-        type: 'story',
-        subtype: 'story',
-        name: story.name,
-      } satisfies IndexInput;
-    });
 }

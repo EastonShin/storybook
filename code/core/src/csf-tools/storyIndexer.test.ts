@@ -15,8 +15,7 @@ const getIndex = (code: string) => {
 
 describe('OXC indexer fast path', () => {
   const makeTitle = (title?: string) => title || 'title';
-  const getOxcIndex = (code: string) =>
-    indexCsfWithOxc(code, 'a.stories.tsx', { makeTitle });
+  const getOxcIndex = (code: string) => indexCsfWithOxc(code, 'a.stories.tsx', { makeTitle });
 
   it('matches Babel indexing for common CSF 1-3 shapes', () => {
     const code = `
