@@ -81,14 +81,38 @@ describe('OXC indexer fast path', () => {
     expect(getOxcIndex(code)).toEqual(babel);
   });
 
-  it('falls back for assignment-based CSF2 annotations', () => {
+  it('matches Babel indexing for CSF2 bind and assignment annotations', () => {
     const code = `
       export default { title: 'Button' };
-      export const Primary = {};
+
+      const Template = (args) => args;
+      export const Primary = Template.bind({});
       Primary.storyName = 'Primary button';
+      Primary.args = { label: 'Primary' };
+
+      export const Secondary = Template.bind({});
+      Secondary.parameters = { layout: 'centered' };
     `;
 
-    expect(getOxcIndex(code)).toBeNull();
+    const babel = loadCsf(code, { makeTitle, fileName: 'a.stories.tsx' }).parse().indexInputs;
+    expect(getOxcIndex(code)).toEqual(babel);
+  });
+
+  it('matches Babel include and exclude story filtering', () => {
+    const code = `
+      export default {
+        title: 'Button',
+        includeStories: /^[A-Z]/,
+        excludeStories: ['Helper'],
+      };
+
+      export const Primary = {};
+      export const Helper = {};
+      export const helper = {};
+    `;
+
+    const babel = loadCsf(code, { makeTitle, fileName: 'a.stories.tsx' }).parse().indexInputs;
+    expect(getOxcIndex(code)).toEqual(babel);
   });
 
   it('falls back for CSF test syntax', () => {
