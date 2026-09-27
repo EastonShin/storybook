@@ -513,6 +513,7 @@ export function indexCsfWithOxc(
 
   const body = result.program.body as AstNode[];
   const bindings = new Map<string, AstNode>();
+  const rawBindings = new Map<string, AstNode>();
   const importsByLocalName = new Map<string, string>();
   const importSources: string[] = [];
 
@@ -540,7 +541,11 @@ export function indexCsfWithOxc(
     if (declaration.type === 'VariableDeclaration') {
       for (const declarator of declaration.declarations ?? []) {
         const name = identifierName(declarator.id);
+        const rawInit = isNode(declarator.init) ? declarator.init : undefined;
         const init = unwrapExpression(declarator.init);
+        if (name && rawInit) {
+          rawBindings.set(name, rawInit);
+        }
         if (name && init) {
           bindings.set(name, init);
         }
