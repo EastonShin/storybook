@@ -323,12 +323,12 @@ const parseStory = (
     name: storyNameFromExport(exportName),
     tags: [],
     annotations: new Set(),
-    storyFn: ['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration'].includes(
-      node.type
-    ),
+    storyFn: ['ArrowFunctionExpression', 'FunctionDeclaration'].includes(node.type),
   };
 
-  if (story.storyFn) {
+  if (
+    ['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration'].includes(node.type)
+  ) {
     return story;
   }
 
@@ -344,7 +344,9 @@ const parseStory = (
     ) {
       return null;
     }
-    story.storyFn = true;
+    story.storyFn = ['ArrowFunctionExpression', 'FunctionDeclaration'].includes(
+      resolvedTemplate.type
+    );
     return story;
   }
 
@@ -393,6 +395,74 @@ const parseStory = (
   }
 
   return story;
+};
+
+const memberNames = (node: unknown) => {
+  const resolved = unwrapExpression(node);
+  if (
+    !resolved ||
+    resolved.type !== 'MemberExpression' ||
+    resolved.computed ||
+    !isNode(resolved.object) ||
+    !isNode(resolved.property)
+  ) {
+    return undefined;
+  }
+
+  const object = identifierName(resolved.object);
+  const property = identifierName(resolved.property);
+  return object && property ? { object, property } : undefined;
+};
+
+const applyLegacyAnnotation = (
+  story: StaticStory,
+  key: string,
+  value: unknown,
+  bindings: Map<string, AstNode>
+) => {
+  if (key === 'story') {
+    const properties = objectProperties(value);
+    if (!properties) {
+      story.annotations.add(key);
+      return true;
+    }
+
+    for (const property of properties) {
+      const nestedKey = propertyName(property);
+      if (
+        nestedKey &&
+        !applyLegacyAnnotation(story, nestedKey, propertyValue(property), bindings)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  story.annotations.add(key);
+
+  if (key === 'storyName') {
+    const name = stringValue(resolveBinding(value, bindings));
+    if (name !== undefined) {
+      story.name = name;
+    }
+    return true;
+  }
+
+  if (key === 'tags') {
+    const tags = stringArray(value, bindings);
+    if (!tags) {
+      return false;
+    }
+    story.tags = tags;
+    return true;
+  }
+
+  if (key === 'play') {
+    story.play = unwrapExpression(value);
+  }
+
+  return true;
 };
 
 /**
@@ -459,15 +529,16 @@ export function indexCsfWithOxc(
           bindings.set(name, init);
         }
       }
+    } else if (declaration.type === 'FunctionDeclaration') {
+      const name = identifierName(declaration.id);
+      if (name) {
+        bindings.set(name, declaration);
+      }
     }
   }
 
   let metaNode: AstNode | undefined;
   for (const statement of body) {
-    if (statement.type === 'ExpressionStatement') {
-      return fallback('expression-statement');
-    }
-
     if (statement.type === 'ExportAllDeclaration') {
       return fallback('export-all');
     }
@@ -502,44 +573,88 @@ export function indexCsfWithOxc(
   const moduleMock = importSources.some((source) => MODULE_MOCK_REGEX.test(source));
 
   const stories: StaticStory[] = [];
-  for (const statement of body) {
-    if (statement.type !== 'ExportNamedDeclaration' || !isNode(statement.declaration)) {
-      continue;
-    }
+  const storyByExportName = new Map<string, StaticStory>();
 
-    const declaration = statement.declaration;
-    if (declaration.type === 'VariableDeclaration') {
-      for (const declarator of declaration.declarations ?? []) {
-        const exportName = identifierName(declarator.id);
+  for (const statement of body) {
+    if (statement.type === 'ExportNamedDeclaration' && isNode(statement.declaration)) {
+      const declaration = statement.declaration;
+
+      if (declaration.type === 'VariableDeclaration') {
+        for (const declarator of declaration.declarations ?? []) {
+          const exportName = identifierName(declarator.id);
+          if (!exportName) {
+            return fallback('story-export');
+          }
+          if (exportName === '__namedExportsOrder') {
+            return fallback('named-exports-order');
+          }
+
+          const story = parseStory(exportName, declarator.init, bindings);
+          if (!story) {
+            return fallback('story-unsupported');
+          }
+
+          stories.push(story);
+          storyByExportName.set(exportName, story);
+        }
+      } else if (declaration.type === 'FunctionDeclaration') {
+        const exportName = identifierName(declaration.id);
         if (!exportName) {
           return fallback('story-export');
         }
-        if (exportName === '__namedExportsOrder') {
-          return fallback('named-exports-order');
-        }
-        const story = parseStory(exportName, declarator.init, bindings);
+
+        const story = parseStory(exportName, declaration, bindings);
         if (!story) {
           return fallback('story-unsupported');
         }
+
         stories.push(story);
+        storyByExportName.set(exportName, story);
       }
-    } else if (declaration.type === 'FunctionDeclaration') {
-      const exportName = identifierName(declaration.id);
-      if (!exportName) {
-        return fallback('story-export');
+
+      continue;
+    }
+
+    if (statement.type !== 'ExpressionStatement') {
+      continue;
+    }
+
+    const expression = unwrapExpression(statement.expression);
+    if (!expression) {
+      continue;
+    }
+
+    if (expression.type === 'CallExpression') {
+      const callee = memberNames(expression.callee);
+      if (callee?.property === 'test' && storyByExportName.has(callee.object)) {
+        return fallback('expression-statement');
       }
-      const story = parseStory(exportName, declaration, bindings);
-      if (!story) {
-        return fallback('story-unsupported');
-      }
-      stories.push(story);
+      continue;
+    }
+
+    if (expression.type !== 'AssignmentExpression') {
+      continue;
+    }
+
+    const target = memberNames(expression.left);
+    if (!target) {
+      continue;
+    }
+
+    const story = storyByExportName.get(target.object);
+    if (!story) {
+      continue;
+    }
+
+    if (!applyLegacyAnnotation(story, target.property, expression.right, bindings)) {
+      return fallback('expression-statement');
     }
   }
 
   const metaForFilter = {
-    id: meta.id,
-    title: meta.title,
-  } as Parameters<typeof isExportStory>[1];
+    includeStories: meta.includeStories,
+    excludeStories: meta.excludeStories,
+  };
 
   return stories
     .filter((story) => isExportStory(story.exportName, metaForFilter))
