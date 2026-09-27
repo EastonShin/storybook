@@ -50,6 +50,7 @@ type StaticStory = {
   customId?: string;
   annotations: Set<string>;
   storyFn: boolean;
+  factory: boolean;
   play?: AstNode;
   playTagInjected: boolean;
 };
@@ -232,7 +233,7 @@ const annotationStats = (
   meta: StaticMeta,
   moduleMock: boolean
 ): IndexInputStats => ({
-  factory: false,
+  factory: story.factory,
   play: story.annotations.has('play') || meta.annotations.has('play'),
   render: story.annotations.has('render') || meta.annotations.has('render'),
   loaders: story.annotations.has('loaders') || meta.annotations.has('loaders'),
@@ -325,6 +326,7 @@ const parseStory = (
     tags: [],
     annotations: new Set(),
     storyFn: ['ArrowFunctionExpression', 'FunctionDeclaration'].includes(node.type),
+    factory: false,
     playTagInjected: false,
   };
 
