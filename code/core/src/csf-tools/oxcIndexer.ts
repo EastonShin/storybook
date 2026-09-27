@@ -657,10 +657,28 @@ export function indexCsfWithOxc(
             return fallback('named-exports-order');
           }
 
-          const story = parseStory(exportName, declarator.init, bindings);
+          let storyInput = declarator.init;
+          let factory = false;
+
+          if (factoryMetaName) {
+            const call = memberCall(declarator.init);
+            if (
+              !call ||
+              call.object !== factoryMetaName ||
+              !['story', 'extend'].includes(call.method)
+            ) {
+              continue;
+            }
+
+            factory = true;
+            storyInput = Array.isArray(call.node.arguments) ? call.node.arguments[0] : undefined;
+          }
+
+          const story = parseStory(exportName, storyInput, bindings);
           if (!story) {
             return fallback('story-unsupported');
           }
+          story.factory = factory;
 
           stories.push(story);
           storyByExportName.set(exportName, story);
