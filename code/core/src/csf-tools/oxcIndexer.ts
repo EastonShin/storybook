@@ -514,6 +514,7 @@ export function indexCsfWithOxc(
   const body = result.program.body as AstNode[];
   const bindings = new Map<string, AstNode>();
   const rawBindings = new Map<string, AstNode>();
+  const previewImports = new Set<string>();
   const importsByLocalName = new Map<string, string>();
   const importSources: string[] = [];
 
@@ -528,6 +529,9 @@ export function indexCsfWithOxc(
         const localName = identifierName(specifier.local);
         if (localName) {
           importsByLocalName.set(localName, source);
+          if (source.includes('.storybook/preview')) {
+            previewImports.add(localName);
+          }
         }
       }
       continue;
