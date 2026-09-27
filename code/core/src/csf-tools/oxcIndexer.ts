@@ -313,6 +313,7 @@ const parseStory = (
   input: unknown,
   bindings: Map<string, AstNode>
 ): StaticStory | null => {
+  const rawNode = isNode(input) ? input : undefined;
   const node = unwrapExpression(input);
   if (!node) {
     return null;
@@ -333,7 +334,9 @@ const parseStory = (
     return story;
   }
 
-  if (isCanonicalCsf2BindCall(node)) {
+  // Babel's CSF2 bind detection only recognizes a direct bind call. A TypeScript wrapper such as
+  // `Template.bind({}) as Story` is not treated as a bind story, so preserve that behavior.
+  if (rawNode === node && isCanonicalCsf2BindCall(node)) {
     const templateName = identifierName(node.callee.object);
     const template = templateName ? bindings.get(templateName) : undefined;
     const resolvedTemplate = template && unwrapExpression(template);
