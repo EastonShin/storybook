@@ -17,4 +17,8 @@ export { babelParse } from 'storybook/internal/babel';
 export { vitestTransform } from './vitest-plugin/transformer.ts';
 export { componentTransform } from './vitest-plugin/component-transformer.ts';
 
-export { indexCsfWithOxc } from './oxcIndexer.ts';
+export {
+  type OxcCsfFallbackReason,
+  type OxcCsfIndexerDiagnostics,
+  indexCsfWithOxc,
+} from './oxcIndexer.ts';
