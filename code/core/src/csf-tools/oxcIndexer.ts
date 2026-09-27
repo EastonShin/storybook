@@ -12,6 +12,24 @@ type AstNode = {
   [key: string]: any;
 };
 
+export type OxcCsfFallbackReason =
+  | 'parse-error'
+  | 'program-error'
+  | 'import-source'
+  | 'expression-statement'
+  | 'export-all'
+  | 'default-export'
+  | 'named-export-specifier'
+  | 'missing-meta'
+  | 'meta-unsupported'
+  | 'story-export'
+  | 'named-exports-order'
+  | 'story-unsupported';
+
+export type OxcCsfIndexerDiagnostics = {
+  fallbackReason?: OxcCsfFallbackReason;
+};
+
 type StaticMeta = {
   id?: string;
   title?: string;
@@ -211,7 +229,7 @@ const parseMeta = (
       }
       meta.tags = value;
     } else if (key === 'component') {
-      const componentName = identifierName(unwrapExpression(propertyValue(property)));
+      const componentName = identifierName(propertyValue(property));
       if (componentName) {
         meta.rawComponentPath = importsByLocalName.get(componentName);
       }
@@ -311,17 +329,24 @@ const parseStory = (
 export function indexCsfWithOxc(
   code: string,
   fileName: string,
-  options: IndexerOptions
+  options: IndexerOptions,
+  diagnostics?: OxcCsfIndexerDiagnostics
 ): IndexInput[] | null {
+  const fallback = (reason: OxcCsfFallbackReason) => {
+    if (diagnostics) {
+      diagnostics.fallbackReason = reason;
+    }
+    return null;
+  };
   let result: ReturnType<typeof parseSync>;
   try {
     result = parseSync(fileName, code);
   } catch {
-    return null;
+    return fallback('parse-error');
   }
 
   if (result.errors.length > 0 || !result.program || !Array.isArray(result.program.body)) {
-    return null;
+    return fallback('program-error');
   }
 
   const body = result.program.body as AstNode[];
@@ -333,7 +358,7 @@ export function indexCsfWithOxc(
     if (statement.type === 'ImportDeclaration') {
       const source = stringValue(statement.source);
       if (!source) {
-        return null;
+        return fallback('import-source');
       }
       importSources.push(source);
       for (const specifier of statement.specifiers ?? []) {
@@ -364,18 +389,17 @@ export function indexCsfWithOxc(
   let metaNode: AstNode | undefined;
   for (const statement of body) {
     if (statement.type === 'ExpressionStatement') {
-      // Covers CSF2 assignment annotations and CSF test syntax. Keep Babel semantics for now.
-      return null;
+      return fallback('expression-statement');
     }
 
     if (statement.type === 'ExportAllDeclaration') {
-      return null;
+      return fallback('export-all');
     }
 
     if (statement.type === 'ExportDefaultDeclaration') {
       const declaration = resolveBinding(statement.declaration, bindings);
       if (!declaration || declaration.type !== 'ObjectExpression') {
-        return null;
+        return fallback('default-export');
       }
       metaNode = declaration;
     }
@@ -385,18 +409,17 @@ export function indexCsfWithOxc(
       Array.isArray(statement.specifiers) &&
       statement.specifiers.length > 0
     ) {
-      // Includes `export { X }` and re-export forms. They need local/export binding resolution.
-      return null;
+      return fallback('named-export-specifier');
     }
   }
 
   if (!metaNode) {
-    return null;
+    return fallback('missing-meta');
   }
 
   const meta = parseMeta(metaNode, bindings, importsByLocalName);
   if (!meta) {
-    return null;
+    return fallback('meta-unsupported');
   }
 
   meta.title = options.makeTitle(meta.title);
@@ -413,25 +436,25 @@ export function indexCsfWithOxc(
       for (const declarator of declaration.declarations ?? []) {
         const exportName = identifierName(declarator.id);
         if (!exportName) {
-          return null;
+          return fallback('story-export');
         }
         if (exportName === '__namedExportsOrder') {
-          return null;
+          return fallback('named-exports-order');
         }
         const story = parseStory(exportName, declarator.init, bindings);
         if (!story) {
-          return null;
+          return fallback('story-unsupported');
         }
         stories.push(story);
       }
     } else if (declaration.type === 'FunctionDeclaration') {
       const exportName = identifierName(declaration.id);
       if (!exportName) {
-        return null;
+        return fallback('story-export');
       }
       const story = parseStory(exportName, declaration, bindings);
       if (!story) {
-        return null;
+        return fallback('story-unsupported');
       }
       stories.push(story);
     }
