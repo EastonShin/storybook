@@ -98,6 +98,20 @@ describe('OXC indexer fast path', () => {
     expect(getOxcIndex(code)).toEqual(babel);
   });
 
+  it('matches Babel semantics for cast CSF2 bind expressions', () => {
+    const code = `
+      type Story = { args?: Record<string, unknown> };
+
+      export default { title: 'Button' };
+
+      const Template = () => 'foo';
+      export const Bound = Template.bind({}) as typeof Template & Story;
+    `;
+
+    const babel = loadCsf(code, { makeTitle, fileName: 'a.stories.tsx' }).parse().indexInputs;
+    expect(getOxcIndex(code)).toEqual(babel);
+  });
+
   it('matches Babel legacy play and tags assignment semantics', () => {
     const code = `
       export default { title: 'Button' };
