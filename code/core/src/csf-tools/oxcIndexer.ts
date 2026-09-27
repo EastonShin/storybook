@@ -30,11 +30,15 @@ export type OxcCsfIndexerDiagnostics = {
   fallbackReason?: OxcCsfFallbackReason;
 };
 
+type StoryDescriptor = string[] | RegExp;
+
 type StaticMeta = {
   id?: string;
   title?: string;
   tags: string[];
   rawComponentPath?: string;
+  includeStories?: StoryDescriptor;
+  excludeStories?: StoryDescriptor;
   annotations: Set<string>;
   play?: AstNode;
 };
@@ -141,6 +145,59 @@ const stringArray = (node: unknown, bindings: Map<string, AstNode>): string[] | 
   return values;
 };
 
+const regexValue = (node: unknown, bindings: Map<string, AstNode>): RegExp | undefined => {
+  const resolved = resolveBinding(node, bindings);
+  if (!resolved) {
+    return undefined;
+  }
+
+  if (
+    resolved.type === 'RegExpLiteral' &&
+    typeof resolved.pattern === 'string' &&
+    typeof resolved.flags === 'string'
+  ) {
+    return new RegExp(resolved.pattern, resolved.flags);
+  }
+
+  if (
+    resolved.type === 'Literal' &&
+    resolved.regex &&
+    typeof resolved.regex.pattern === 'string'
+  ) {
+    return new RegExp(resolved.regex.pattern, resolved.regex.flags ?? '');
+  }
+
+  return undefined;
+};
+
+const storyDescriptor = (
+  node: unknown,
+  bindings: Map<string, AstNode>
+): StoryDescriptor | undefined => stringArray(node, bindings) ?? regexValue(node, bindings);
+
+const isCanonicalCsf2BindCall = (node: AstNode) => {
+  if (node.type !== 'CallExpression' || !isNode(node.callee)) {
+    return false;
+  }
+
+  const callee = node.callee;
+  if (
+    callee.type !== 'MemberExpression' ||
+    callee.computed ||
+    identifierName(callee.property) !== 'bind' ||
+    !identifierName(callee.object)
+  ) {
+    return false;
+  }
+
+  const args = Array.isArray(node.arguments) ? node.arguments : [];
+  if (args.length === 0) {
+    return true;
+  }
+
+  return args.length === 1 && objectProperties(args[0])?.length === 0;
+};
+
 const findProperty = (node: unknown, name: string) =>
   objectProperties(node)?.find((property) => propertyName(property) === name);
 
@@ -234,8 +291,11 @@ const parseMeta = (
         meta.rawComponentPath = importsByLocalName.get(componentName);
       }
     } else if (key === 'includeStories' || key === 'excludeStories') {
-      // Filtering semantics are subtle; keep the Babel implementation as the oracle for now.
-      return null;
+      const value = storyDescriptor(propertyValue(property), bindings);
+      if (!value) {
+        return null;
+      }
+      meta[key] = value;
     } else if (key === 'play') {
       meta.play = unwrapExpression(propertyValue(property));
     }
@@ -269,6 +329,22 @@ const parseStory = (
   };
 
   if (story.storyFn) {
+    return story;
+  }
+
+  if (isCanonicalCsf2BindCall(node)) {
+    const templateName = identifierName(node.callee.object);
+    const template = templateName ? bindings.get(templateName) : undefined;
+    const resolvedTemplate = template && unwrapExpression(template);
+    if (
+      !resolvedTemplate ||
+      !['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration'].includes(
+        resolvedTemplate.type
+      )
+    ) {
+      return null;
+    }
+    story.storyFn = true;
     return story;
   }
 
