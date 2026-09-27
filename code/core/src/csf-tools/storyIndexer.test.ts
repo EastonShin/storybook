@@ -168,6 +168,19 @@ describe('OXC indexer fast path', () => {
     expect(getOxcIndex(code)).toEqual(babel);
   });
 
+  it('matches Babel storyFn stats for function-valued factory stories', () => {
+    const code = `
+      import preview from '#.storybook/preview';
+
+      const meta = preview.meta({ title: 'Button' });
+
+      export const Primary = meta.story(() => 'foo');
+    `;
+
+    const babel = loadCsf(code, { makeTitle, fileName: 'a.stories.tsx' }).parse().indexInputs;
+    expect(getOxcIndex(code)).toEqual(babel);
+  });
+
   it('does not treat unrelated meta calls as CSF factory meta', () => {
     const code = `
       import { z } from 'zod';
