@@ -204,6 +204,27 @@ const findProperty = (node: unknown, name: string) =>
 
 const propertyValue = (property: AstNode | undefined) => property?.value;
 
+const memberCall = (input: unknown) => {
+  const node = unwrapExpression(input);
+  if (!node || node.type !== 'CallExpression' || !isNode(node.callee)) {
+    return undefined;
+  }
+
+  const callee = node.callee;
+  if (
+    callee.type !== 'MemberExpression' ||
+    callee.computed ||
+    !isNode(callee.object) ||
+    !isNode(callee.property)
+  ) {
+    return undefined;
+  }
+
+  const object = identifierName(callee.object);
+  const method = identifierName(callee.property);
+  return object && method ? { node, object, method } : undefined;
+};
+
 const hasMount = (input: unknown) => {
   const node = unwrapExpression(input);
   if (
