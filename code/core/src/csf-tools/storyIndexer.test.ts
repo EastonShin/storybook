@@ -146,6 +146,39 @@ describe('OXC indexer fast path', () => {
     expect(getOxcIndex(code)).toEqual(babel);
   });
 
+  it('matches Babel indexing for CSF factory stories', () => {
+    const code = `
+      import preview from '#.storybook/preview';
+
+      const meta = preview.meta({
+        id: 'button',
+        title: 'Button',
+        tags: ['autodocs'],
+      });
+
+      export const Primary = meta.story({
+        name: 'Primary button',
+        tags: ['smoke'],
+      });
+
+      export const Helper = {};
+    `;
+
+    const babel = loadCsf(code, { makeTitle, fileName: 'a.stories.tsx' }).parse().indexInputs;
+    expect(getOxcIndex(code)).toEqual(babel);
+  });
+
+  it('does not treat unrelated meta calls as CSF factory meta', () => {
+    const code = `
+      import { z } from 'zod';
+
+      const schema = z.string().meta({ title: 'not a story meta' });
+      export const Value = {};
+    `;
+
+    expect(getOxcIndex(code)).toBeNull();
+  });
+
   it('falls back for CSF test syntax', () => {
     const code = `
       export default { title: 'Button' };
