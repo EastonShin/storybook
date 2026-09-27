@@ -98,6 +98,23 @@ describe('OXC indexer fast path', () => {
     expect(getOxcIndex(code)).toEqual(babel);
   });
 
+  it('matches Babel legacy play and tags assignment semantics', () => {
+    const code = `
+      export default { title: 'Button' };
+
+      export const Primary = {};
+      Primary.play = async () => {};
+      Primary.tags = ['smoke'];
+
+      export const Secondary = {};
+      Secondary.tags = ['smoke'];
+      Secondary.play = async () => {};
+    `;
+
+    const babel = loadCsf(code, { makeTitle, fileName: 'a.stories.tsx' }).parse().indexInputs;
+    expect(getOxcIndex(code)).toEqual(babel);
+  });
+
   it('matches Babel include and exclude story filtering', () => {
     const code = `
       export default {
