@@ -679,6 +679,9 @@ export function indexCsfWithOxc(
             return fallback('story-unsupported');
           }
           story.factory = factory;
+          if (factory) {
+            story.storyFn = false;
+          }
 
           stories.push(story);
           storyByExportName.set(exportName, story);
