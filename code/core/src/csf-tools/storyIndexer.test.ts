@@ -43,6 +43,24 @@ describe('OXC indexer fast path', () => {
     expect(getOxcIndex(code)).toEqual(babel);
   });
 
+  it('matches Babel component path semantics for cast component expressions', () => {
+    const code = `
+      import type { Meta } from '@storybook/react';
+      import { Button } from './Button';
+
+      const meta = {
+        title: 'Components/Button',
+        component: Button as any,
+      } satisfies Meta;
+
+      export default meta;
+      export const Primary = {};
+    `;
+
+    const babel = loadCsf(code, { makeTitle, fileName: 'a.stories.tsx' }).parse().indexInputs;
+    expect(getOxcIndex(code)).toEqual(babel);
+  });
+
   it('supports TypeScript satisfies wrappers', () => {
     const code = `
       import type { Meta, StoryObj } from '@storybook/react';
