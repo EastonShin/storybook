@@ -1,13 +1,21 @@
 import { readFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
+import { dirname, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 import { globby } from 'globby';
-import { indexCsfWithOxc, loadCsf } from 'storybook/internal/csf-tools';
+import {
+  type OxcCsfFallbackReason,
+  type OxcCsfIndexerDiagnostics,
+  indexCsfWithOxc,
+  loadCsf,
+} from 'storybook/internal/csf-tools';
 
 const STORY_GLOB = 'code/**/*.{story,stories}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}';
 const IGNORE = ['**/node_modules/**', '**/dist/**', 'code/sandbox/**'];
 const REPEAT = Number.parseInt(process.env.CSF_INDEXER_BENCH_REPEAT || '5', 10);
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 type Source = {
   fileName: string;
@@ -32,8 +40,15 @@ const babelIndex = ({ fileName, code }: Source): Outcome => {
 };
 
 const hybridIndex = ({ fileName, code }: Source) => {
+  const diagnostics: OxcCsfIndexerDiagnostics = {};
+
   try {
-    const fast = indexCsfWithOxc(code, fileName, { makeTitle: makeTitle(fileName) });
+    const fast = indexCsfWithOxc(
+      code,
+      fileName,
+      { makeTitle: makeTitle(fileName) },
+      diagnostics
+    );
     if (fast) {
       return {
         fastPath: true,
@@ -43,11 +58,13 @@ const hybridIndex = ({ fileName, code }: Source) => {
 
     return {
       fastPath: false,
+      fallbackReason: diagnostics.fallbackReason,
       outcome: babelIndex({ fileName, code }),
     };
   } catch (error) {
     return {
       fastPath: false,
+      fallbackReason: diagnostics.fallbackReason,
       outcome: {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
@@ -71,7 +88,11 @@ const percentile = (values: number[], ratio: number) => {
 
 const format = (value: number) => `${value.toFixed(2)} ms`;
 
-const files = await globby(STORY_GLOB, { ignore: IGNORE, absolute: true });
+const files = await globby(STORY_GLOB, {
+  cwd: REPO_ROOT,
+  ignore: IGNORE,
+  absolute: true,
+});
 const sources = await Promise.all(
   files.map(async (fileName) => ({
     fileName,
@@ -82,6 +103,7 @@ const sources = await Promise.all(
 const baseline = new Map<string, Outcome>();
 const hybrid = new Map<string, ReturnType<typeof hybridIndex>>();
 let fastPathHits = 0;
+const fallbackReasons = new Map<OxcCsfFallbackReason | 'unknown', number>();
 
 for (const source of sources) {
   const baselineResult = babelIndex(source);
@@ -90,6 +112,10 @@ for (const source of sources) {
   baseline.set(source.fileName, baselineResult);
   hybrid.set(source.fileName, hybridResult);
   fastPathHits += hybridResult.fastPath ? 1 : 0;
+  if (!hybridResult.fastPath) {
+    const reason = hybridResult.fallbackReason ?? 'unknown';
+    fallbackReasons.set(reason, (fallbackReasons.get(reason) ?? 0) + 1);
+  }
 }
 
 const mismatches = sources.filter(({ fileName }) => {
@@ -137,6 +163,12 @@ console.table({
   repeat: REPEAT,
 });
 
+console.table(
+  Object.fromEntries(
+    [...fallbackReasons.entries()].sort((a, b) => b[1] - a[1])
+  )
+);
+
 console.table({
   babelAverage: format(babelAverage),
   babelP95: format(percentile(babelTimings, 0.95)),
@@ -149,6 +181,8 @@ if (mismatches.length > 0) {
   console.error('Parity mismatches:');
   for (const { fileName } of mismatches.slice(0, 20)) {
     console.error(fileName);
+    console.error('Babel:', JSON.stringify(baseline.get(fileName), null, 2));
+    console.error('Hybrid:', JSON.stringify(hybrid.get(fileName)?.outcome, null, 2));
   }
   process.exitCode = 1;
 }
