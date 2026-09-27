@@ -104,6 +104,7 @@ const baseline = new Map<string, Outcome>();
 const hybrid = new Map<string, ReturnType<typeof hybridIndex>>();
 let fastPathHits = 0;
 const fallbackReasons = new Map<OxcCsfFallbackReason | 'unknown', number>();
+const fallbackFiles = new Map<OxcCsfFallbackReason | 'unknown', string[]>();
 
 for (const source of sources) {
   const baselineResult = babelIndex(source);
@@ -115,6 +116,9 @@ for (const source of sources) {
   if (!hybridResult.fastPath) {
     const reason = hybridResult.fallbackReason ?? 'unknown';
     fallbackReasons.set(reason, (fallbackReasons.get(reason) ?? 0) + 1);
+    const files = fallbackFiles.get(reason) ?? [];
+    files.push(source.fileName);
+    fallbackFiles.set(reason, files);
   }
 }
 
@@ -168,6 +172,17 @@ console.table(
     [...fallbackReasons.entries()].sort((a, b) => b[1] - a[1])
   )
 );
+
+if (process.env.CSF_INDEXER_BENCH_FALLBACK_FILES === '1') {
+  for (const [reason, files] of [...fallbackFiles.entries()].sort(
+    (a, b) => b[1].length - a[1].length
+  )) {
+    console.log(`\nFallback: ${reason} (${files.length})`);
+    for (const fileName of files) {
+      console.log(fileName);
+    }
+  }
+}
 
 console.table({
   babelAverage: format(babelAverage),
