@@ -43,7 +43,8 @@
     "test": "cd .. && NODE_OPTIONS=--max_old_space_size=4096 vitest run --project scripts",
     "test:watch": "cd .. && NODE_OPTIONS=--max_old_space_size=4096 vitest watch --project scripts",
     "upgrade": "jiti ./task.ts",
-    "upload-bench": "jiti ./upload-bench.ts"
+    "upload-bench": "jiti ./upload-bench.ts",
+    "bench-csf-indexer": "node ./bench/csf-indexer.ts"
   },
   "dependencies": {
     "@actions/core": "^1.11.1",

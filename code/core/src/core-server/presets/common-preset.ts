@@ -16,7 +16,7 @@ import {
   removeAddon as removeAddonBase,
 } from 'storybook/internal/common';
 import { StoryIndexGenerator } from 'storybook/internal/core-server';
-import { loadCsf } from 'storybook/internal/csf-tools';
+import { indexCsfWithOxc, loadCsf } from 'storybook/internal/csf-tools';
 import { logger } from 'storybook/internal/node-logger';
 import { telemetry } from 'storybook/internal/telemetry';
 import {
@@ -264,6 +264,13 @@ export const csfIndexer: Indexer = {
       logger.debug(`The file ${fileName} is empty. Skipping indexing.`);
       return [];
     }
+    if (process.env.STORYBOOK_EXPERIMENTAL_OXC_CSF_INDEXER === '1') {
+      const index = indexCsfWithOxc(code, fileName, options);
+      if (index) {
+        return index;
+      }
+    }
+
     return loadCsf(code, { ...options, fileName }).parse().indexInputs;
   },
 };
