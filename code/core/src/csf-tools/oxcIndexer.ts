@@ -51,6 +51,7 @@ type StaticStory = {
   annotations: Set<string>;
   storyFn: boolean;
   play?: AstNode;
+  playTagInjected: boolean;
 };
 
 const isNode = (value: unknown): value is AstNode =>
@@ -153,10 +154,9 @@ const regexValue = (node: unknown, bindings: Map<string, AstNode>): RegExp | und
 
   if (
     resolved.type === 'RegExpLiteral' &&
-    typeof resolved.pattern === 'string' &&
-    typeof resolved.flags === 'string'
+    typeof resolved.pattern === 'string'
   ) {
-    return new RegExp(resolved.pattern, resolved.flags);
+    return new RegExp(resolved.pattern, resolved.flags ?? '');
   }
 
   if (
@@ -324,6 +324,7 @@ const parseStory = (
     tags: [],
     annotations: new Set(),
     storyFn: ['ArrowFunctionExpression', 'FunctionDeclaration'].includes(node.type),
+    playTagInjected: false,
   };
 
   if (
@@ -392,6 +393,7 @@ const parseStory = (
 
   if (story.annotations.has('play')) {
     story.tags = [...story.tags, Tag.PLAY_FN];
+    story.playTagInjected = true;
   }
 
   return story;
@@ -454,12 +456,17 @@ const applyLegacyAnnotation = (
     if (!tags) {
       return false;
     }
-    story.tags = tags;
+    story.tags = story.annotations.has('play') ? [...tags, Tag.PLAY_FN] : tags;
+    story.playTagInjected = story.annotations.has('play');
     return true;
   }
 
   if (key === 'play') {
     story.play = unwrapExpression(value);
+    if (!story.playTagInjected) {
+      story.tags = [...story.tags, Tag.PLAY_FN];
+      story.playTagInjected = true;
+    }
   }
 
   return true;
